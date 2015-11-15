@@ -47,10 +47,11 @@
    should be defined for readability.
 */
 typedef enum {
-	AMP_DRIVE  = 0,
-	AMP_GAIN   = 1,
-	AMP_INPUT  = 2,
-	AMP_OUTPUT = 3
+	AMP_DRIVE   = 0,
+	AMP_GAIN    = 1,
+	AMP_INPUT   = 2,
+	AMP_OUTPUT  = 3,
+	AMP_LATENCY = 4
 } PortIndex;
 
 /**
@@ -66,6 +67,8 @@ typedef struct {
 
 	const float* lv2_input;
 	float*       lv2_output;
+
+	float*       latency;
 
 	float*       up_input;
 	uint32_t     up_in_level;
@@ -90,6 +93,11 @@ typedef struct {
 #define BUFFER_LEN 8192
 #define BUFFER_LEN4 (8192 * 4)
 #define OVER_SAMPLE_RATE 2.0f
+
+/* convert enums in samplerate.h choices are */
+/* SRC_SINC_BEST_QUALITY SRC_SINC_MEDIUM_QUALITY SRC_SINC_FASTEST SRC_ZERO_ORDER_HOLD SRC_LINEAR */
+
+#define CONVERTER SRC_SINC_FASTEST
 
 /**
    The `connect_port()` method is called by the host to connect a particular
@@ -118,6 +126,9 @@ connect_port(LV2_Handle instance,
 		break;
 	case AMP_OUTPUT:
 		amp->lv2_output = (float*)data;
+		break;
+	case AMP_LATENCY:
+		amp->latency = data;
 		break;
 	}
 }
@@ -342,6 +353,8 @@ run(LV2_Handle instance, uint32_t n_samples)
 	process(amp);
 	down_sample(amp);
 	generate_output(amp, n_samples);
+
+	*(amp->latency) = (float)n_samples;
 }
 
 /**
@@ -385,14 +398,14 @@ instantiate(const LV2_Descriptor*     descriptor,
 		amp->first_run = 1;
 	}
 
-	amp->up_state = src_new (1, 1, &error) ;
+	amp->up_state = src_new (CONVERTER, 1, &error) ;
 	if (error != 0) {
 		printf("Error on up new %d\n",error);
 		message =  src_strerror(error);
 		printf("%s\n",message);
 	}
 
-	amp->down_state = src_new (1, 1, &error) ;
+	amp->down_state = src_new (CONVERTER, 1, &error) ;
 	if (error != 0) {
 		printf("Error on down new %d\n",error);
 		message =  src_strerror(error);

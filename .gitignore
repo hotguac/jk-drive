@@ -30,3 +30,8 @@
 
 # Debug files
 *.dSYM/
+
+# build files and directories
+build/
+.waf*/
+.lock*

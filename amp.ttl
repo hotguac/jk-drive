@@ -110,4 +110,14 @@
 		lv2:index 3 ;
 		lv2:symbol "out" ;
 		lv2:name "Out"
-	] .
+	] , [
+		a lv2:OutputPort,
+			lv2:ControlPort ;
+		lv2:name "latency" ;
+		lv2:index 4 ;
+		lv2:symbol "latency" ;
+		lv2:minimum 0 ;
+		lv2:maximum 192000 ;
+		lv2:portProperty lv2:reportsLatency, lv2:integer;
+		units:unit units:frame;
+	]  .
