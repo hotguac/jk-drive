@@ -112,6 +112,9 @@ connect_port(LV2_Handle instance,
              uint32_t   port,
              void*      data)
 {
+#ifdef JK_DRIVE_DEBUG
+	printf("JK_DRIVE: Connect Port %d\n", port);
+#endif
 	Amp* amp = (Amp*)instance;
 
 	switch ((PortIndex)port) {
@@ -190,10 +193,10 @@ up_sample(Amp* amp)
 	result = src_process(amp->up_state,src_data);
 
 	if (result != 0) {
-		printf("error up sample processing %d\n",result);
+		printf("JK_DRIVE: error up sample processing %d\n",result);
 
 		message = src_strerror(result);
-		printf("%s\n", message);
+		printf("JK_DRIVE: %s\n", message);
 	}
 
 	amp->process_level += src_data->output_frames_gen;
@@ -260,9 +263,9 @@ process(Amp* amp)
 	down_in_level = amp->down_in_level;
 
 	if (n_to_copy > BUFFER_LEN4 - down_in_level) {
-		printf("dropping processing samples\n");
-		printf("needed %ul samples\n",n_to_copy);
-		printf("only %ul available\n",BUFFER_LEN - down_in_level);
+		printf("JK_DRIVE: dropping processing samples\n");
+		printf("JK_DRIVE: needed %ul samples\n",n_to_copy);
+		printf("JK_DRIVE: only %ul available\n",BUFFER_LEN - down_in_level);
 		n_to_copy = BUFFER_LEN - down_in_level;
 	}
 
@@ -292,9 +295,9 @@ down_sample(Amp* amp)
 
 	int result = src_process(amp->down_state,src_data);
 	if (result) {
-		printf("error down sample %d\n", result);
+		printf("JK_DRIVE: error down sample %d\n", result);
 		message = src_strerror(result);
-		printf("%s\n", message);
+		printf("JK_DRIVE: %s\n", message);
 	}
 
 	amp->generate_in_level += src_data->output_frames_gen;
@@ -336,6 +339,9 @@ generate_output(Amp* amp, uint32_t n_samples)
 	amp->generate_in_level = in_level;
 }
 
+
+
+
 /**
    The `run()` method is the main process function of the plugin.  It processes
    a block of audio in the audio context.  Since this plugin is
@@ -345,7 +351,9 @@ generate_output(Amp* amp, uint32_t n_samples)
 static void
 run(LV2_Handle instance, uint32_t n_samples)
 {
-	/* printf("JK Drive run\n"); */
+#ifdef JK_DRIVE_DEBUG
+	printf("JK_DRIVE: Run %d\n", n_samples);
+#endif
 	Amp* amp = (Amp*)instance;
 
 	add_to_input(amp, n_samples);
@@ -377,6 +385,9 @@ instantiate(const LV2_Descriptor*     descriptor,
 	int error;
 	const char* message;
 
+#ifdef JK_DRIVE_DEBUG
+	printf("JK_DRIVE: Instantiate %f\n", rate);
+#endif
 	Amp* amp = (Amp*)malloc(sizeof(Amp));
 
 	if (amp != 0) {
@@ -400,16 +411,16 @@ instantiate(const LV2_Descriptor*     descriptor,
 
 	amp->up_state = src_new (CONVERTER, 1, &error) ;
 	if (error != 0) {
-		printf("Error on up new %d\n",error);
+		printf("JK_DRIVE: Error on up new %d\n",error);
 		message =  src_strerror(error);
-		printf("%s\n",message);
+		printf("JK_DRIVE: %s\n",message);
 	}
 
 	amp->down_state = src_new (CONVERTER, 1, &error) ;
 	if (error != 0) {
-		printf("Error on down new %d\n",error);
+		printf("JK_DRIVE: Error on down new %d\n",error);
 		message =  src_strerror(error);
-		printf("%s\n",message);
+		printf("JK_DRIVE: %s\n",message);
 	}
 
 	return (LV2_Handle)amp;
@@ -427,6 +438,12 @@ instantiate(const LV2_Descriptor*     descriptor,
 static void
 activate(LV2_Handle instance)
 {
+#ifdef JK_DRIVE_DEBUG
+	printf("JK_DRIVE: Activate\n");
+#endif
+	Amp* amp = (Amp*)instance;
+
+	amp->first_run = 1;
 }
 
 /**
@@ -443,6 +460,34 @@ activate(LV2_Handle instance)
 static void
 deactivate(LV2_Handle instance)
 {
+#ifdef JK_DRIVE_DEBUG
+	printf("JK_DRIVE: Deactivate\n");
+#endif
+	int result = 0;
+	const char* message;
+
+	Amp* amp = (Amp*)instance;
+
+	/* First flush the up sample convertor */
+	result = src_reset(amp->up_state);
+
+	if (result != 0) {
+		message = src_strerror(result);
+		printf("JK_DRIVE: Deactivate up reset error %s\n", message);
+	}
+
+	amp->up_in_level = 0;
+	amp->process_level = 0;
+
+	/* Now flush the down sample convertor */
+	result = src_reset(amp->down_state);
+	if (result) {
+		message = src_strerror(result);
+		printf("JK_DRIVE: Deactivate down reset error %s\n", message);
+	}
+
+	amp->down_in_level = 0;
+	amp->generate_in_level = 0;
 }
 
 
@@ -455,6 +500,9 @@ deactivate(LV2_Handle instance)
 static void
 cleanup(LV2_Handle instance)
 {
+#ifdef JK_DRIVE_DEBUG
+	printf("JK_DRIVE: Cleanup\n");
+#endif
 	Amp* amp = (Amp*)instance;
 
 	(void) src_delete(amp->up_state);
@@ -518,6 +566,10 @@ LV2_SYMBOL_EXPORT
 const LV2_Descriptor*
 lv2_descriptor(uint32_t index)
 {
+#ifdef JK_DRIVE_DEBUG
+	printf("JK_DRIVE: lv2_descriptor %d\n", index);
+#endif
+
 	switch (index) {
 	case 0:  return &descriptor;
 	default: return NULL;
