@@ -65,6 +65,9 @@ typedef struct {
 	const float* gain;
 	const float* drive;
 
+	float        prev_gain;
+	float        prev_drive;
+
 	const float* lv2_input;
 	float*       lv2_output;
 
@@ -88,6 +91,7 @@ typedef struct {
 	uint32_t     generate_in_level;
 
 	int          first_run;
+	double       save_rate;
 } Amp;
 
 #define BUFFER_LEN 8192
@@ -98,6 +102,7 @@ typedef struct {
 /* SRC_SINC_BEST_QUALITY SRC_SINC_MEDIUM_QUALITY SRC_SINC_FASTEST SRC_ZERO_ORDER_HOLD SRC_LINEAR */
 
 #define CONVERTER SRC_SINC_FASTEST
+/* #define JK_DRIVE_DEBUG 1 */
 
 /**
    The `connect_port()` method is called by the host to connect a particular
@@ -211,71 +216,154 @@ up_sample(Amp* amp)
 static void
 process(Amp* amp)
 {
+	const float soft = 0.4f;
+	const float hard = 1.4f;
+	const float max  = 0.99f;
+	float over;
+	float pover;
+
+	float factor;
+
+	float in_comp_range = hard - soft;
+	float out_comp_range = max - soft;
+
+	const float ramp_secs = 0.002f;
+
 	float* dest;
-	uint32_t n_to_copy;
 	uint32_t down_in_level;
+        uint32_t ramp_frames;
+	uint32_t pos;
+
+	const double rate = amp->save_rate;
 
 	const float gain   = *(amp->gain);
-	const float coef_gain = DB_CO(gain);
-
+	float prev_gain = amp->prev_gain;
 
 	const float drive  = *(amp->drive);
-	const float coef_drive = DB_CO(drive);
-
-	const float soft = 0.6f;
-	const float hard = 1.2f;
-	const float max  = 0.9f;
+	float prev_drive = amp->prev_drive;
 
 	const float* input = amp->process_input;
 	float* output = amp->process_output;
 
 	uint32_t process_level = amp->process_level;
-	uint32_t pos;
+	float coef_drive = DB_CO(drive);
+	float coef_gain = DB_CO(gain);
+
+	ramp_frames = (uint32_t) (rate * OVER_SAMPLE_RATE) * ramp_secs;
+
+	/*
+	printf("prev_gain=%f gain=%f prev_drive=%f drive=%f\n",prev_gain,gain,prev_drive,drive);
+	printf("target gain=%f target drive=%f\n",DB_CO(gain),DB_CO(drive));
+	printf("start gain=%f start drive=%f\n",DB_CO(prev_gain),DB_CO(prev_drive));
+	printf("ramp_frames=%d ",ramp_frames);
+	*/
+
+	if (ramp_frames > process_level) {
+		/* Make sure the ramp is finished by end of this cycle */
+		ramp_frames = process_level;
+	}
+
+	/* printf("%d ",ramp_frames); */
+	if (ramp_frames == 0) {
+		/* Prevent divide by zero below */
+		ramp_frames = 1;
+	}
+
+	const float gain_step = (gain - prev_gain) / ramp_frames;
+	const float drive_step = (drive - prev_drive) /ramp_frames;
+
+	/*
+	printf("%d\n",ramp_frames);
+	printf("gain_step = %f\n",gain_step);
+	printf("drive step = %f\n",drive_step);
+	*/
+
+	/* if either input or output buffer failed to allocated */
+	/* then nothing to process */
+	if ((input == 0) || (output == 0)) {
+		process_level = 0;
+	}
 
 	for (pos = 0; pos < process_level; pos++) {
-		/* Do some wave shaping */
+		if (pos < ramp_frames) {
+			prev_drive += drive_step;
+			coef_drive = DB_CO(prev_drive);
 
-		output[pos] = input[pos] * coef_drive;
-		if (output[pos] > hard) {
-			output[pos] = max;
-		} else if (output[pos] < -hard) {
-			output[pos] = -max;
-		} else if (output[pos] > soft) {
-			output[pos] = soft + sin((355/230)*((output[pos]-soft)/(hard-soft))) * (max - soft);
-		} else if (output[pos] < -soft) {
-			output[pos] = -soft - sin((355/230)*((-output[pos]-soft)/(hard-soft))) * (max - soft);
+			prev_gain += gain_step;
+			coef_gain = DB_CO(prev_gain);
 		}
 
+		/* printf("p=%d in=%f ",pos,input[pos]); */
+
+		/* Do some wave shaping */
+		output[pos] = input[pos] * coef_drive;
+		/* printf("driven=%f ",output[pos]); */
+
+		if (output[pos] > hard) {
+			output[pos] = hard;
+			/* printf("output+hard=%f",output[pos]); */
+
+		} else if (output[pos] < -hard) {
+			output[pos] = -hard;
+			/* printf("output-hard=%f",output[pos]); */
+
+		} else if (output[pos] > soft) {
+			over = output[pos] - soft;
+			pover = over / in_comp_range;
+
+			factor = out_comp_range * pover; /* * pover; */
+
+			output[pos] = soft + factor;
+
+			/* printf("aft=%f povr=%f fctr=%f ",
+			   output[pos],pover, factor); */
+
+
+		} else if (output[pos] < -soft) {
+			over = output[pos] + soft;
+			pover = over / in_comp_range;
+
+			factor = out_comp_range * pover; /* * pover; */
+
+			output[pos] = -soft + factor;
+
+			/* printf("aft=%f povr=%f fctr=%f ",
+			   output[pos],pover, factor); */
+		}
+
+		/* Apply output gain */
 		output[pos] *= coef_gain;
 
 		/* Prevent wrap around clipping by hard clipping */
-		if (output[pos] > 0.999f) {
-			output[pos] = 0.999f;
-		} else if (output[pos] < -0.999f) {
-			output[pos] = -0.999f;
+		if (output[pos] > max) {
+			output[pos] = max;
+			/* printf("hard+clip=%f",output[pos]); */
+		} else if (output[pos] < -max) {
+			output[pos] = -max;
+			/* printf("hard-clip=%f",output[pos]); */
 		}
-
-
+		/* printf("\n"); */
 	}
 
 	dest = amp->down_input;
-	n_to_copy = amp->process_level;
 	down_in_level = amp->down_in_level;
 
-	if (n_to_copy > BUFFER_LEN4 - down_in_level) {
+	if (process_level > BUFFER_LEN4 - down_in_level) {
 		printf("JK_DRIVE: dropping processing samples\n");
-		printf("JK_DRIVE: needed %ul samples\n",n_to_copy);
+		printf("JK_DRIVE: needed %ul samples\n",process_level);
 		printf("JK_DRIVE: only %ul available\n",BUFFER_LEN - down_in_level);
-		n_to_copy = BUFFER_LEN - down_in_level;
+		process_level = BUFFER_LEN - down_in_level;
 	}
 
-	for (pos = 0; pos < n_to_copy; pos++) {
+	for (pos = 0; pos < process_level; pos++) {
 		dest[down_in_level] = output[pos];
 		down_in_level++;
 	}
 
 	amp->down_in_level = down_in_level;
 	amp->process_level = 0;
+	amp->prev_gain = gain;
+	amp->prev_drive = drive;
 }
 
 static void
@@ -407,20 +495,22 @@ instantiate(const LV2_Descriptor*     descriptor,
 		amp->down_data = malloc(sizeof(SRC_DATA));
 
 		amp->first_run = 1;
-	}
 
-	amp->up_state = src_new (CONVERTER, 1, &error) ;
-	if (error != 0) {
-		printf("JK_DRIVE: Error on up new %d\n",error);
-		message =  src_strerror(error);
-		printf("JK_DRIVE: %s\n",message);
-	}
+		amp->up_state = src_new (CONVERTER, 1, &error) ;
+		if (error != 0) {
+			printf("JK_DRIVE: Error on up new %d\n",error);
+			message =  src_strerror(error);
+			printf("JK_DRIVE: %s\n",message);
+		}
 
-	amp->down_state = src_new (CONVERTER, 1, &error) ;
-	if (error != 0) {
-		printf("JK_DRIVE: Error on down new %d\n",error);
-		message =  src_strerror(error);
-		printf("JK_DRIVE: %s\n",message);
+		amp->down_state = src_new (CONVERTER, 1, &error) ;
+		if (error != 0) {
+			printf("JK_DRIVE: Error on down new %d\n",error);
+			message =  src_strerror(error);
+			printf("JK_DRIVE: %s\n",message);
+		}
+
+		amp->save_rate  = rate;
 	}
 
 	return (LV2_Handle)amp;
@@ -443,7 +533,11 @@ activate(LV2_Handle instance)
 #endif
 	Amp* amp = (Amp*)instance;
 
-	amp->first_run = 1;
+	if (amp != 0) {
+		amp->first_run = 1;
+		amp->prev_gain  = 0.0f;
+		amp->prev_drive = 0.0f;
+	}
 }
 
 /**
