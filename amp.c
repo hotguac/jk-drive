@@ -130,7 +130,7 @@ connect_port(LV2_Handle instance,
 		amp->drive = (const float*)data;
 		break;
 	case AMP_INPUT:
-		amp->lv2_input = (const float*)data;
+ 		amp->lv2_input = (const float*)data;
 		break;
 	case AMP_OUTPUT:
 		amp->lv2_output = (float*)data;
@@ -172,7 +172,13 @@ add_to_input(Amp* amp, uint32_t n_samples)
 	}
 
 	for (pos = 0; pos < n_to_copy; pos++) {
-		dest[up_in_level] = source[pos];
+		/* check for a disconnected input port */
+		if (source == 0) {
+			dest[up_in_level] = 0.0f;
+		} else {
+			dest[up_in_level] = source[pos];
+		}
+
 		up_in_level++;
 	}
 
@@ -233,37 +239,42 @@ process(Amp* amp)
 	uint32_t down_in_level;
         uint32_t ramp_frames;
 	uint32_t pos;
+	float gain;
+	float drive;
+	float coef_drive;
+	float coef_gain;
 
 	const double rate = amp->save_rate;
-
-	const float gain   = *(amp->gain);
 	float prev_gain = amp->prev_gain;
-
-	const float drive  = *(amp->drive);
 	float prev_drive = amp->prev_drive;
 
 	const float* input = amp->process_input;
 	float* output = amp->process_output;
 
 	uint32_t process_level = amp->process_level;
-	float coef_drive = DB_CO(drive);
-	float coef_gain = DB_CO(gain);
+
+	if (amp->gain == 0) {
+		gain = 0.0f;
+	} else {
+		gain   = *(amp->gain);
+	}
+
+	if (amp->drive == 0) {
+		drive = 0.0f;
+	} else {
+		drive = *(amp->drive);
+	}
+
+	coef_drive = DB_CO(drive);
+	coef_gain = DB_CO(gain);
 
 	ramp_frames = (uint32_t) (rate * OVER_SAMPLE_RATE) * ramp_secs;
-
-	/*
-	printf("prev_gain=%f gain=%f prev_drive=%f drive=%f\n",prev_gain,gain,prev_drive,drive);
-	printf("target gain=%f target drive=%f\n",DB_CO(gain),DB_CO(drive));
-	printf("start gain=%f start drive=%f\n",DB_CO(prev_gain),DB_CO(prev_drive));
-	printf("ramp_frames=%d ",ramp_frames);
-	*/
 
 	if (ramp_frames > process_level) {
 		/* Make sure the ramp is finished by end of this cycle */
 		ramp_frames = process_level;
 	}
 
-	/* printf("%d ",ramp_frames); */
 	if (ramp_frames == 0) {
 		/* Prevent divide by zero below */
 		ramp_frames = 1;
@@ -271,12 +282,6 @@ process(Amp* amp)
 
 	const float gain_step = (gain - prev_gain) / ramp_frames;
 	const float drive_step = (drive - prev_drive) /ramp_frames;
-
-	/*
-	printf("%d\n",ramp_frames);
-	printf("gain_step = %f\n",gain_step);
-	printf("drive step = %f\n",drive_step);
-	*/
 
 	/* if either input or output buffer failed to allocated */
 	/* then nothing to process */
@@ -293,31 +298,33 @@ process(Amp* amp)
 			coef_gain = DB_CO(prev_gain);
 		}
 
-		/* printf("p=%d in=%f ",pos,input[pos]); */
-
 		/* Do some wave shaping */
 		output[pos] = input[pos] * coef_drive;
-		/* printf("driven=%f ",output[pos]); */
 
 		if (output[pos] > hard) {
-			output[pos] = hard;
+			output[pos] = max;
 			/* printf("output+hard=%f",output[pos]); */
 
 		} else if (output[pos] < -hard) {
-			output[pos] = -hard;
+			output[pos] = -max;
 			/* printf("output-hard=%f",output[pos]); */
 
 		} else if (output[pos] > soft) {
+			/*
+			printf("p=%d in=%f ",pos,input[pos]);
+			printf("driven=%f ",output[pos]);
+			*/
+
 			over = output[pos] - soft;
 			pover = over / in_comp_range;
-
 			factor = out_comp_range * pover; /* * pover; */
 
 			output[pos] = soft + factor;
 
-			/* printf("aft=%f povr=%f fctr=%f ",
-			   output[pos],pover, factor); */
-
+			/*
+			printf("aft=%f povr=%f fctr=%f\n",
+			       output[pos],pover, factor);
+			*/
 
 		} else if (output[pos] < -soft) {
 			over = output[pos] + soft;
@@ -342,7 +349,6 @@ process(Amp* amp)
 			output[pos] = -max;
 			/* printf("hard-clip=%f",output[pos]); */
 		}
-		/* printf("\n"); */
 	}
 
 	dest = amp->down_input;
@@ -409,16 +415,20 @@ generate_output(Amp* amp, uint32_t n_samples)
 		n_to_copy = in_level;
 	}
 
-	for (pos = 0; pos < n_to_copy; pos++) {
-		output[pos] = amp->generate_input[pos];
+	/* check to make sure output is connected to a buffer */
+	/* before writing to output */
+	if (output != 0) {
+		for (pos = 0; pos < n_to_copy; pos++) {
+			output[pos] = amp->generate_input[pos];
+		}
+
+		/* pad if necessary */
+		for (pos = n_to_copy; pos < n_samples; pos++) {
+			output[pos] = 0.0f;
+		}
 	}
 
-	/* now pad if necessary */
-	for (pos = n_to_copy; pos < n_samples; pos++) {
-		output[pos] = 0.0f;
-	}
-
-	/* now shift unused samples */
+	/* shift any unused input samples */
 	if ((in_level > n_to_copy) && (n_to_copy > 0)) {
 		in_level -= n_to_copy;
 		memmove(amp->generate_input,(amp->generate_input + n_to_copy),in_level*sizeof(float));
@@ -426,9 +436,6 @@ generate_output(Amp* amp, uint32_t n_samples)
 
 	amp->generate_in_level = in_level;
 }
-
-
-
 
 /**
    The `run()` method is the main process function of the plugin.  It processes
@@ -450,7 +457,9 @@ run(LV2_Handle instance, uint32_t n_samples)
 	down_sample(amp);
 	generate_output(amp, n_samples);
 
-	*(amp->latency) = (float)n_samples;
+	if (amp->latency != 0) {
+		*(amp->latency) = (float)n_samples;
+	}
 }
 
 /**
