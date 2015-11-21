@@ -92,6 +92,9 @@ typedef struct {
 
 	int          first_run;
 	double       save_rate;
+
+	float        dc_last_X;
+	float        dc_last_Y;
 } Amp;
 
 #define BUFFER_LEN 8192
@@ -222,16 +225,7 @@ up_sample(Amp* amp)
 static void
 process(Amp* amp)
 {
-	const float soft = 0.4f;
-	const float hard = 1.4f;
 	const float max  = 0.99f;
-	float over;
-	float pover;
-
-	float factor;
-
-	float in_comp_range = hard - soft;
-	float out_comp_range = max - soft;
 
 	const float ramp_secs = 0.002f;
 
@@ -268,6 +262,8 @@ process(Amp* amp)
 	coef_drive = DB_CO(drive);
 	coef_gain = DB_CO(gain);
 
+	printf("coef_drive=%f  coef_gain=%f\n", coef_drive, coef_gain);
+
 	ramp_frames = (uint32_t) (rate * OVER_SAMPLE_RATE) * ramp_secs;
 
 	if (ramp_frames > process_level) {
@@ -299,47 +295,27 @@ process(Amp* amp)
 		}
 
 		/* Do some wave shaping */
-		output[pos] = input[pos] * coef_drive;
+		/* Step 1 - add 2nd order harmonics */
+		/*   y = (a*x + b*x*x) * coef_drive = x*(a + b*x)*coef_drive */
+		output[pos] = input[pos] * (0.5f  + (0.5f * input[pos])) * coef_drive;
 
-		if (output[pos] > hard) {
-			output[pos] = max;
-			/* printf("output+hard=%f",output[pos]); */
+		/* Step 2 - remove DC offset from step 1 with highpass/notch */
+		/* filtered_value = 0.996 × (last_filtered_value + sample - last_sample) */
+		/* or y[n] = x[n] - x[n-1] + a * y[n-1] */
+		float y = output[pos] - amp->dc_last_X + (0.998 * amp->dc_last_Y);
+		amp->dc_last_X = output[pos];
+		amp->dc_last_Y = y;
+		output[pos] = y;
 
-		} else if (output[pos] < -hard) {
-			output[pos] = -max;
-			/* printf("output-hard=%f",output[pos]); */
+		/* Step 3 - do more waveshaping to add odd harmonics */
+		const float L = 1.96f;
+		const float k10 = 2.4f;
+		float fx;
 
-		} else if (output[pos] > soft) {
-			/*
-			printf("p=%d in=%f ",pos,input[pos]);
-			printf("driven=%f ",output[pos]);
-			*/
-
-			over = output[pos] - soft;
-			pover = over / in_comp_range;
-			factor = out_comp_range * pover; /* * pover; */
-
-			output[pos] = soft + factor;
-
-			/*
-			printf("aft=%f povr=%f fctr=%f\n",
-			       output[pos],pover, factor);
-			*/
-
-		} else if (output[pos] < -soft) {
-			over = output[pos] + soft;
-			pover = over / in_comp_range;
-
-			factor = out_comp_range * pover; /* * pover; */
-
-			output[pos] = -soft + factor;
-
-			/* printf("aft=%f povr=%f fctr=%f ",
-			   output[pos],pover, factor); */
-		}
+		fx = (L / (1.0f + expf(output[pos] * -k10))) - (L / 2.0f);
 
 		/* Apply output gain */
-		output[pos] *= coef_gain;
+		output[pos] = fx * coef_gain;
 
 		/* Prevent wrap around clipping by hard clipping */
 		if (output[pos] > max) {
@@ -543,9 +519,11 @@ activate(LV2_Handle instance)
 	Amp* amp = (Amp*)instance;
 
 	if (amp != 0) {
-		amp->first_run = 1;
+		amp->first_run  = 1;
 		amp->prev_gain  = 0.0f;
 		amp->prev_drive = 0.0f;
+		amp->dc_last_X  = 0.0f;
+		amp->dc_last_Y  = 0.0f;
 	}
 }
 
