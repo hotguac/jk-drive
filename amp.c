@@ -176,7 +176,7 @@ add_to_input(Amp* amp, uint32_t n_samples)
 
 	for (pos = 0; pos < n_to_copy; pos++) {
 		/* check for a disconnected input port */
-		if (source == 0) {
+		if (source == NULL) {
 			dest[up_in_level] = 0.0f;
 		} else {
 			dest[up_in_level] = source[pos];
@@ -247,13 +247,13 @@ process(Amp* amp)
 
 	uint32_t process_level = amp->process_level;
 
-	if (amp->gain == 0) {
+	if (amp->gain == NULL) {
 		gain = 0.0f;
 	} else {
 		gain   = *(amp->gain);
 	}
 
-	if (amp->drive == 0) {
+	if (amp->drive == NULL) {
 		drive = 0.0f;
 	} else {
 		drive = *(amp->drive);
@@ -281,7 +281,7 @@ process(Amp* amp)
 
 	/* if either input or output buffer failed to allocated */
 	/* then nothing to process */
-	if ((input == 0) || (output == 0)) {
+	if ((input == NULL) || (output == NULL)) {
 		process_level = 0;
 	}
 
@@ -307,7 +307,12 @@ process(Amp* amp)
 		amp->dc_last_Y = y;
 		output[pos] = y;
 
-		/* Step 3 - do more waveshaping to add odd harmonics */
+		/* Step 3 - do more waveshaping to add odd harmonics   */
+		/* use logistics function to apply an 'S' curve        */
+		/* see https://en.wikipedia.org/wiki/Logistic_function */
+		/* k10 : 2.16 gives unity gain at x~0.4 use for 0db gain*/
+		/* k10 : 2.40 gives unity gain at x~0.6 */
+		/* k10 : 2.88 gives unity gain at x~0.8 use for 24db gain*/
 		const float L = 1.96f;
 		const float k10 = 2.4f;
 		float fx;
@@ -393,7 +398,7 @@ generate_output(Amp* amp, uint32_t n_samples)
 
 	/* check to make sure output is connected to a buffer */
 	/* before writing to output */
-	if (output != 0) {
+	if (output != NULL) {
 		for (pos = 0; pos < n_to_copy; pos++) {
 			output[pos] = amp->generate_input[pos];
 		}
@@ -427,13 +432,27 @@ run(LV2_Handle instance, uint32_t n_samples)
 #endif
 	Amp* amp = (Amp*)instance;
 
+	if (amp == NULL) {
+		return;
+	}
+
+	if ((amp->up_input == NULL) ||
+	    (amp->process_input == NULL) ||
+	    (amp->process_output == NULL) ||
+	    (amp->down_input == NULL) ||
+	    (amp->generate_input == NULL) ||
+	    (amp->up_data == NULL) ||
+	    (amp->down_data == NULL)) {
+		return;
+	}
+
 	add_to_input(amp, n_samples);
 	up_sample(amp);
 	process(amp);
 	down_sample(amp);
 	generate_output(amp, n_samples);
 
-	if (amp->latency != 0) {
+	if (amp->latency != NULL) {
 		*(amp->latency) = (float)n_samples;
 	}
 }
@@ -463,9 +482,10 @@ instantiate(const LV2_Descriptor*     descriptor,
 #endif
 	Amp* amp = (Amp*)malloc(sizeof(Amp));
 
-	if (amp != 0) {
+	if (amp != NULL) {
 	/* we'll size the buffers once and hope they're big enough!!! */
-		amp->up_input = malloc(BUFFER_LEN * sizeof(float));
+		/*		amp->up_input = malloc(BUFFER_LEN * sizeof(float)); */
+		amp->up_input = NULL; /* TESTING ONLY !!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
 		amp->process_input = malloc(BUFFER_LEN4 * sizeof(float));
 		amp->process_output = malloc(BUFFER_LEN4 * sizeof(float));
 		amp->down_input = malloc(BUFFER_LEN4 * sizeof(float));
@@ -518,7 +538,7 @@ activate(LV2_Handle instance)
 #endif
 	Amp* amp = (Amp*)instance;
 
-	if (amp != 0) {
+	if (amp != NULL) {
 		amp->first_run  = 1;
 		amp->prev_gain  = 0.0f;
 		amp->prev_drive = 0.0f;
