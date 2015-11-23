@@ -22,6 +22,9 @@
 #include <stdio.h>
 #include <string.h>
 
+/** Include Secret Rabbit Code        **/
+/** for sample rate conversion        **/
+/** see http://www.mega-nerd.com/SRC/ **/
 #include <samplerate.h>
 
 /**
@@ -35,16 +38,15 @@
 
 /**
    The URI is the identifier for a plugin, and how the host associates this
-   implementation in code with its description in data.  In this plugin it is
-   only used once in the code, but defining the plugin URI at the top of the
-   file is a good convention to follow.  If this URI does not match that used
-   in the data files, the host will fail to load the plugin.
+   implementation in code with its description in data. If this URI does not
+   match that used in the data files, the host will fail to load the plugin.
 */
 #define AMP_URI "http://mrkmusings.com/jk-drive"
 
 /**
-   In code, ports are referred to by index.  An enumeration of port indices
-   should be defined for readability.
+   In the code, ports are referred to by index.  An enumeration of port indices
+   should be defined for readability. They need to match the definitions in the
+   *.ttl file.
 */
 typedef enum {
 	AMP_DRIVE   = 0,
@@ -55,51 +57,51 @@ typedef enum {
 } PortIndex;
 
 /**
-   Every plugin defines a private structure for the plugin instance.  All data
+   Define a private structure for the plugin instance.  All data
    associated with a plugin instance is stored here, and is available to
-   every instance method.  In this simple plugin, only port buffers need to be
-   stored, since there is no additional instance data.
-*/
+   every instance method, being passed back through the 'instance' parameter.
+**/
 typedef struct {
 	// Port buffers
-	const float* gain;
-	const float* drive;
+	const float* gain;         // lv2 control port
+	const float* drive;        // lv2 control port
 
-	float        prev_gain;
-	float        prev_drive;
+	const float* lv2_input;    // lv2 audio port;
+	float*       lv2_output;   // lv2 audio port;
 
-	const float* lv2_input;
-	float*       lv2_output;
+	float*       latency;      // lv2 control port (output);
 
-	float*       latency;
+	float        prev_gain;    // save for smoothing
+	float        prev_drive;   // save for smoothing
 
-	float*       up_input;
-	uint32_t     up_in_level;
-	SRC_DATA*    up_data;
-	SRC_STATE*   up_state;
+	float*       up_input;     // buffer in for up convert
+	uint32_t     up_in_level;  // how many frames in buffer
+	SRC_DATA*    up_data;      // save conversion config
+	SRC_STATE*   up_state;     // save conversion state
 
-	float*       process_input;
-	float*       process_output;
-	long int     process_level;
+	float*       process_input;     // buffer in for waveshaping
+	float*       process_output;    // how many frames in buffer
+	long int     process_level;     // buffer out for waveshaping
 
-	float*       down_input;
-	uint32_t     down_in_level;
-	SRC_DATA*    down_data;
-	SRC_STATE*   down_state;
+	float*       down_input;        // buffer for down conversion
+	uint32_t     down_in_level;     // how many frames in buffer
+	SRC_DATA*    down_data;         // save conversion config
+	SRC_STATE*   down_state;        // save conversion state
 
-	float*       generate_input;
-	uint32_t     generate_in_level;
+	float*       generate_input;    // buffer to generate output
+	uint32_t     generate_in_level; // how many frames in buffer
 
-	int          first_run;
-	double       save_rate;
+	int          first_run;         // do we need to prime the
+	                                // up sample process
+	double       save_rate;         // sample rate in fps
 
-	float        dc_last_X;
-	float        dc_last_Y;
+	float        dc_last_X;         // used for dc bias removal
+	float        dc_last_Y;         // used for dc bias removal
 } Amp;
 
-#define BUFFER_LEN 8192
-#define BUFFER_LEN4 (8192 * 4)
 #define OVER_SAMPLE_RATE 2.0f
+#define BUFFER_LEN 8192
+#define BUFFER_LEN_UP (8192 * (int) OVER_SAMPLE_RATE)
 
 /* convert enums in samplerate.h choices are */
 /* SRC_SINC_BEST_QUALITY SRC_SINC_MEDIUM_QUALITY SRC_SINC_FASTEST SRC_ZERO_ORDER_HOLD SRC_LINEAR */
@@ -107,47 +109,10 @@ typedef struct {
 #define CONVERTER SRC_SINC_FASTEST
 /* #define JK_DRIVE_DEBUG 1 */
 
-/**
-   The `connect_port()` method is called by the host to connect a particular
-   port to a buffer.  The plugin must store the data location, but data may not
-   be accessed except in run().
-
-   This method is in the ``audio'' threading class, and is called in the same
-   context as run().
-*/
-static void
-connect_port(LV2_Handle instance,
-             uint32_t   port,
-             void*      data)
-{
-#ifdef JK_DRIVE_DEBUG
-	printf("JK_DRIVE: Connect Port %d\n", port);
-#endif
-	Amp* amp = (Amp*)instance;
-
-	switch ((PortIndex)port) {
-	case AMP_GAIN:
-		amp->gain = (const float*)data;
-		break;
-	case AMP_DRIVE:
-		amp->drive = (const float*)data;
-		break;
-	case AMP_INPUT:
- 		amp->lv2_input = (const float*)data;
-		break;
-	case AMP_OUTPUT:
-		amp->lv2_output = (float*)data;
-		break;
-	case AMP_LATENCY:
-		amp->latency = data;
-		break;
-	}
-}
-
 /** Define a macro for converting a gain in dB to a coefficient. */
 #define DB_CO(g) ((g) > -90.0f ? powf(10.0f, (g) * 0.05f) : 0.0f)
 
-/* We're always adding to end of input queue. Using routines are responsible */
+/* Always add to end of input queue. Using routines are responsible */
 /* for shifting data up */
 static void
 add_to_input(Amp* amp, uint32_t n_samples)
@@ -170,12 +135,12 @@ add_to_input(Amp* amp, uint32_t n_samples)
 	}
 
 	if (n_samples > BUFFER_LEN - up_in_level) {
-		printf("dropping input samples\n");
+		fprintf(stderr, "JK_DRIVE: dropping input samples\n");
 		n_to_copy = BUFFER_LEN - up_in_level;
 	}
 
+	// check for a disconnected input port */
 	for (pos = 0; pos < n_to_copy; pos++) {
-		/* check for a disconnected input port */
 		if (source == NULL) {
 			dest[up_in_level] = 0.0f;
 		} else {
@@ -199,7 +164,7 @@ up_sample(Amp* amp)
 	src_data->data_out = amp->process_input + amp->process_level;
 
 	src_data->input_frames = amp->up_in_level;
-	src_data->output_frames = BUFFER_LEN4 - amp->process_level;
+	src_data->output_frames = BUFFER_LEN_UP - amp->process_level;
 
 	src_data->end_of_input = 0;
 	src_data->src_ratio = OVER_SAMPLE_RATE;
@@ -207,10 +172,10 @@ up_sample(Amp* amp)
 	result = src_process(amp->up_state,src_data);
 
 	if (result != 0) {
-		printf("JK_DRIVE: error up sample processing %d\n",result);
+		fprintf(stderr, "JK_DRIVE: error up sample processing %d\n",result);
 
 		message = src_strerror(result);
-		printf("JK_DRIVE: %s\n", message);
+		fprintf(stderr, "JK_DRIVE: %s\n", message);
 	}
 
 	amp->process_level += src_data->output_frames_gen;
@@ -218,7 +183,9 @@ up_sample(Amp* amp)
 
 	/* handle case where we didn't use up all input samples */
 	if (src_data->input_frames_used < src_data->input_frames) {
-		memmove(amp->up_input, (amp->up_input + src_data->input_frames_used), amp->up_in_level*sizeof(float));
+		memmove(amp->up_input,
+			(amp->up_input + src_data->input_frames_used),
+			amp->up_in_level*sizeof(float));
 	}
 }
 
@@ -262,25 +229,23 @@ process(Amp* amp)
 	coef_drive = DB_CO(drive);
 	coef_gain = DB_CO(gain);
 
-	printf("coef_drive=%f  coef_gain=%f\n", coef_drive, coef_gain);
-
 	ramp_frames = (uint32_t) (rate * OVER_SAMPLE_RATE) * ramp_secs;
 
+	// Make sure the ramp is finished by end of this cycle
 	if (ramp_frames > process_level) {
-		/* Make sure the ramp is finished by end of this cycle */
 		ramp_frames = process_level;
 	}
 
+	// Prevent divide by zero below
 	if (ramp_frames == 0) {
-		/* Prevent divide by zero below */
 		ramp_frames = 1;
 	}
 
 	const float gain_step = (gain - prev_gain) / ramp_frames;
 	const float drive_step = (drive - prev_drive) /ramp_frames;
 
-	/* if either input or output buffer failed to allocated */
-	/* then nothing to process */
+	// if either input or output buffer failed to allocated
+	// then nothing to process
 	if ((input == NULL) || (output == NULL)) {
 		process_level = 0;
 	}
@@ -325,20 +290,18 @@ process(Amp* amp)
 		/* Prevent wrap around clipping by hard clipping */
 		if (output[pos] > max) {
 			output[pos] = max;
-			/* printf("hard+clip=%f",output[pos]); */
 		} else if (output[pos] < -max) {
 			output[pos] = -max;
-			/* printf("hard-clip=%f",output[pos]); */
 		}
 	}
 
 	dest = amp->down_input;
 	down_in_level = amp->down_in_level;
 
-	if (process_level > BUFFER_LEN4 - down_in_level) {
-		printf("JK_DRIVE: dropping processing samples\n");
-		printf("JK_DRIVE: needed %ul samples\n",process_level);
-		printf("JK_DRIVE: only %ul available\n",BUFFER_LEN - down_in_level);
+	if (process_level > BUFFER_LEN_UP - down_in_level) {
+		fprintf(stderr, "JK_DRIVE: dropping processing samples\n");
+		fprintf(stderr, "JK_DRIVE: needed %ul samples\n", process_level);
+		fprintf(stderr, "JK_DRIVE: only %ul available\n", BUFFER_LEN - down_in_level);
 		process_level = BUFFER_LEN - down_in_level;
 	}
 
@@ -370,9 +333,9 @@ down_sample(Amp* amp)
 
 	int result = src_process(amp->down_state,src_data);
 	if (result) {
-		printf("JK_DRIVE: error down sample %d\n", result);
+		fprintf(stderr,"JK_DRIVE: error down sample %d\n", result);
 		message = src_strerror(result);
-		printf("JK_DRIVE: %s\n", message);
+		fprintf(stderr,"JK_DRIVE: %s\n", message);
 	}
 
 	amp->generate_in_level += src_data->output_frames_gen;
@@ -419,6 +382,44 @@ generate_output(Amp* amp, uint32_t n_samples)
 }
 
 /**
+   The `connect_port()` method is called by the host to connect a particular
+   port to a buffer.  The plugin must store the data location, but data may not
+   be accessed except in run().
+
+   This method is in the ``audio'' threading class, and is called in the same
+   context as run().
+*/
+static void
+connect_port(LV2_Handle instance,
+             uint32_t   port,
+             void*      data)
+{
+	Amp* amp = (Amp*)instance;
+
+	if (amp == NULL ) {
+		return;
+	}
+
+	switch ((PortIndex)port) {
+	case AMP_GAIN:
+		amp->gain = (const float*)data;
+		break;
+	case AMP_DRIVE:
+		amp->drive = (const float*)data;
+		break;
+	case AMP_INPUT:
+ 		amp->lv2_input = (const float*)data;
+		break;
+	case AMP_OUTPUT:
+		amp->lv2_output = (float*)data;
+		break;
+	case AMP_LATENCY:
+		amp->latency = data;
+		break;
+	}
+}
+
+/**
    The `run()` method is the main process function of the plugin.  It processes
    a block of audio in the audio context.  Since this plugin is
    `lv2:hardRTCapable`, `run()` must be real-time safe, so blocking (e.g. with
@@ -427,15 +428,16 @@ generate_output(Amp* amp, uint32_t n_samples)
 static void
 run(LV2_Handle instance, uint32_t n_samples)
 {
-#ifdef JK_DRIVE_DEBUG
-	printf("JK_DRIVE: Run %d\n", n_samples);
-#endif
 	Amp* amp = (Amp*)instance;
 
+	// check that we have a valid instance before
+	// checking for valid buffers
 	if (amp == NULL) {
+		fprintf(stderr, "JK_DRIVE: run() called with NULL instance parameter.\n");
 		return;
 	}
 
+	// Check for valid buffers
 	if ((amp->up_input == NULL) ||
 	    (amp->process_input == NULL) ||
 	    (amp->process_output == NULL) ||
@@ -477,18 +479,14 @@ instantiate(const LV2_Descriptor*     descriptor,
 	int error;
 	const char* message;
 
-#ifdef JK_DRIVE_DEBUG
-	printf("JK_DRIVE: Instantiate %f\n", rate);
-#endif
 	Amp* amp = (Amp*)malloc(sizeof(Amp));
 
 	if (amp != NULL) {
-	/* we'll size the buffers once and hope they're big enough!!! */
-		/*		amp->up_input = malloc(BUFFER_LEN * sizeof(float)); */
-		amp->up_input = NULL; /* TESTING ONLY !!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
-		amp->process_input = malloc(BUFFER_LEN4 * sizeof(float));
-		amp->process_output = malloc(BUFFER_LEN4 * sizeof(float));
-		amp->down_input = malloc(BUFFER_LEN4 * sizeof(float));
+		/* we'll size the buffers once and hope they're big enough */
+		amp->up_input = malloc(BUFFER_LEN * sizeof(float));
+		amp->process_input = malloc(BUFFER_LEN_UP * sizeof(float));
+		amp->process_output = malloc(BUFFER_LEN_UP * sizeof(float));
+		amp->down_input = malloc(BUFFER_LEN_UP * sizeof(float));
 		amp->generate_input = malloc(BUFFER_LEN * sizeof(float));
 
 		amp->up_in_level = 0;
@@ -503,19 +501,21 @@ instantiate(const LV2_Descriptor*     descriptor,
 
 		amp->up_state = src_new (CONVERTER, 1, &error) ;
 		if (error != 0) {
-			printf("JK_DRIVE: Error on up new %d\n",error);
+			fprintf(stderr,"JK_DRIVE: Error on up new %d\n",error);
 			message =  src_strerror(error);
-			printf("JK_DRIVE: %s\n",message);
+			fprintf(stderr,"JK_DRIVE: %s\n",message);
 		}
 
 		amp->down_state = src_new (CONVERTER, 1, &error) ;
 		if (error != 0) {
-			printf("JK_DRIVE: Error on down new %d\n",error);
+			fprintf(stderr,"JK_DRIVE: Error on down new %d\n",error);
 			message =  src_strerror(error);
-			printf("JK_DRIVE: %s\n",message);
+			fprintf(stderr,"JK_DRIVE: %s\n",message);
 		}
 
 		amp->save_rate  = rate;
+	} else {
+		fprintf(stderr, "JK_DRIVE: instantiate() called with NULL instance parameter.\n");
 	}
 
 	return (LV2_Handle)amp;
@@ -533,18 +533,18 @@ instantiate(const LV2_Descriptor*     descriptor,
 static void
 activate(LV2_Handle instance)
 {
-#ifdef JK_DRIVE_DEBUG
-	printf("JK_DRIVE: Activate\n");
-#endif
 	Amp* amp = (Amp*)instance;
 
-	if (amp != NULL) {
-		amp->first_run  = 1;
-		amp->prev_gain  = 0.0f;
-		amp->prev_drive = 0.0f;
-		amp->dc_last_X  = 0.0f;
-		amp->dc_last_Y  = 0.0f;
+	if (amp == NULL) {
+		fprintf(stderr, "JK_DRIVE: activate() called with NULL instance parameter.\n");
+		return;
 	}
+
+	amp->first_run  = 1;
+	amp->prev_gain  = 0.0f;
+	amp->prev_drive = 0.0f;
+	amp->dc_last_X  = 0.0f;
+	amp->dc_last_Y  = 0.0f;
 }
 
 /**
@@ -561,20 +561,21 @@ activate(LV2_Handle instance)
 static void
 deactivate(LV2_Handle instance)
 {
-#ifdef JK_DRIVE_DEBUG
-	printf("JK_DRIVE: Deactivate\n");
-#endif
 	int result = 0;
 	const char* message;
 
 	Amp* amp = (Amp*)instance;
+	if (amp == NULL) {
+		fprintf(stderr, "JK_DRIVE: deactivate() called with NULL instance parameter.\n");
+		return;
+	}
 
 	/* First flush the up sample convertor */
 	result = src_reset(amp->up_state);
 
 	if (result != 0) {
 		message = src_strerror(result);
-		printf("JK_DRIVE: Deactivate up reset error %s\n", message);
+		fprintf(stderr, "JK_DRIVE: Deactivate up reset error %s\n", message);
 	}
 
 	amp->up_in_level = 0;
@@ -584,7 +585,7 @@ deactivate(LV2_Handle instance)
 	result = src_reset(amp->down_state);
 	if (result) {
 		message = src_strerror(result);
-		printf("JK_DRIVE: Deactivate down reset error %s\n", message);
+		fprintf(stderr, "JK_DRIVE: Deactivate down reset error %s\n", message);
 	}
 
 	amp->down_in_level = 0;
@@ -601,10 +602,12 @@ deactivate(LV2_Handle instance)
 static void
 cleanup(LV2_Handle instance)
 {
-#ifdef JK_DRIVE_DEBUG
-	printf("JK_DRIVE: Cleanup\n");
-#endif
 	Amp* amp = (Amp*)instance;
+
+	if (amp == NULL) {
+		fprintf(stderr, "JK_DRIVE: cleanup() called with NULL instance parameter.\n");
+		return;
+	}
 
 	(void) src_delete(amp->up_state);
 	(void) src_delete(amp->down_state);
@@ -667,10 +670,6 @@ LV2_SYMBOL_EXPORT
 const LV2_Descriptor*
 lv2_descriptor(uint32_t index)
 {
-#ifdef JK_DRIVE_DEBUG
-	printf("JK_DRIVE: lv2_descriptor %d\n", index);
-#endif
-
 	switch (index) {
 	case 0:  return &descriptor;
 	default: return NULL;
