@@ -192,9 +192,9 @@ up_sample(Amp* amp)
 static void
 process(Amp* amp)
 {
-	const float max  = 0.99f;
+	const float max  = 0.99f; // hard clip output to this value
 
-	const float ramp_secs = 0.002f;
+	const float ramp_secs = 0.004f;
 
 	float* dest;
 	uint32_t down_in_level;
@@ -244,6 +244,19 @@ process(Amp* amp)
 	const float gain_step = (gain - prev_gain) / ramp_frames;
 	const float drive_step = (drive - prev_drive) /ramp_frames;
 
+	// gain adjust will need changed if drive limits
+	// are changed in amp.ttl
+	// these values were determined empirically
+	const float ag_min = +4.785f; // auto gain adjust at minimum drive
+	const float ag_max = -16.43f; // auto gain adjust at maximum drive
+	const float min_drive = 0.0f; // from .ttl file
+	const float max_drive = +24;  // from .ttl file
+
+	// Calculate automatic gain adjust based on drive
+	float ag_gain = DB_CO(ag_min -
+			      ((*(amp->drive) - min_drive) * (ag_min-ag_max))  /
+			      (max_drive - min_drive));
+
 	// if either input or output buffer failed to allocated
 	// then nothing to process
 	if ((input == NULL) || (output == NULL)) {
@@ -251,9 +264,14 @@ process(Amp* amp)
 	}
 
 	for (pos = 0; pos < process_level; pos++) {
+		/* apply smoothing of drive or gain */
 		if (pos < ramp_frames) {
 			prev_drive += drive_step;
 			coef_drive = DB_CO(prev_drive);
+
+			ag_gain = DB_CO(ag_min -
+					((prev_drive - min_drive) * (ag_min-ag_max))  /
+					(max_drive - min_drive));
 
 			prev_gain += gain_step;
 			coef_gain = DB_CO(prev_gain);
@@ -264,28 +282,31 @@ process(Amp* amp)
 		/*   y = (a*x + b*x*x) * coef_drive = x*(a + b*x)*coef_drive */
 		output[pos] = input[pos] * (0.5f  + (0.5f * input[pos])) * coef_drive;
 
-		/* Step 2 - remove DC offset from step 1 with highpass/notch */
-		/* filtered_value = 0.996 × (last_filtered_value + sample - last_sample) */
-		/* or y[n] = x[n] - x[n-1] + a * y[n-1] */
-		float y = output[pos] - amp->dc_last_X + (0.998 * amp->dc_last_Y);
-		amp->dc_last_X = output[pos];
-		amp->dc_last_Y = y;
-		output[pos] = y;
-
 		/* Step 3 - do more waveshaping to add odd harmonics   */
 		/* use logistics function to apply an 'S' curve        */
 		/* see https://en.wikipedia.org/wiki/Logistic_function */
 		/* k10 : 2.16 gives unity gain at x~0.4 use for 0db gain*/
 		/* k10 : 2.40 gives unity gain at x~0.6 */
 		/* k10 : 2.88 gives unity gain at x~0.8 use for 24db gain*/
-		const float L = 1.96f;
 		const float k10 = 2.4f;
+
+		/* L divided by two gives maximum output level */
+		const float L = 1.96f;
+
 		float fx;
 
 		fx = (L / (1.0f + expf(output[pos] * -k10))) - (L / 2.0f);
 
 		/* Apply output gain */
-		output[pos] = fx * coef_gain;
+		output[pos] = fx * coef_gain * ag_gain;
+
+		/* Step 2 - remove DC offset from step 1 with highpass/notch */
+		/* filtered_value = 0.996 × (last_filtered_value + sample - last_sample) */
+		/* or y[n] = x[n] - x[n-1] + a * y[n-1] */
+		float y = output[pos] - amp->dc_last_X + (0.996 * amp->dc_last_Y);
+		amp->dc_last_X = output[pos];
+		amp->dc_last_Y = y;
+		output[pos] = y;
 
 		/* Prevent wrap around clipping by hard clipping */
 		if (output[pos] > max) {
